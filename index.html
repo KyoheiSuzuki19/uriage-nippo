@@ -222,10 +222,17 @@
       function loadPublished() {
         fetch('./report.json?ts=' + Date.now(), { cache: 'no-store' })
           .then(function (res) { return res.json(); })
-          .then(applyReport)
+          .then(function (data) {
+            applyReport(data);
+            // 日付一覧が空なら、Apps Script から取得を試す
+            if (!data.dateOptions || !data.dateOptions.length) {
+              loadLiveRange('', '', document.getElementById('rangeBtn'), '期間で表示');
+            }
+          })
           .catch(function () {
             document.getElementById('report').textContent =
               '日報の読み込みに失敗しました。しばらくして再読込してください。';
+            loadLiveRange('', '', document.getElementById('rangeBtn'), '期間で表示');
           });
       }
 
