@@ -12,6 +12,7 @@
         --muted: #5f7268;
         --line: #d5e0da;
         --accent: #1f6f54;
+        --warn: #8a4b2d;
       }
       * { box-sizing: border-box; }
       body {
@@ -43,6 +44,41 @@
       }
       .meta { color: var(--muted); font-size: 0.85rem; line-height: 1.5; }
       .actions { display: flex; gap: 8px; flex-wrap: wrap; }
+      .controls {
+        display: flex;
+        gap: 8px;
+        flex-wrap: wrap;
+        align-items: end;
+        margin-bottom: 12px;
+        background: var(--card);
+        border: 1px solid var(--line);
+        border-radius: 14px;
+        padding: 12px;
+      }
+      .field {
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+        min-width: 140px;
+        flex: 1;
+      }
+      .field label {
+        font-size: 0.8rem;
+        color: var(--muted);
+      }
+      .field select {
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 10px 12px;
+        font: inherit;
+        background: #fff;
+        min-height: 44px;
+      }
+      .hint {
+        width: 100%;
+        color: var(--muted);
+        font-size: 0.8rem;
+      }
       button {
         border: 1px solid var(--line);
         background: var(--card);
@@ -58,6 +94,7 @@
         border-color: var(--accent);
         color: #fff;
       }
+      button:disabled { opacity: 0.6; cursor: wait; }
       .card {
         background: var(--card);
         border: 1px solid var(--line);
@@ -72,6 +109,12 @@
         font-family: inherit;
         font-size: 1rem;
         line-height: 1.7;
+      }
+      .error {
+        margin-bottom: 12px;
+        color: var(--warn);
+        font-size: 0.9rem;
+        display: none;
       }
       .toast {
         position: fixed;
@@ -102,15 +145,35 @@
         </div>
         <div class="actions">
           <button class="primary" id="copyBtn">文章をコピー</button>
-          <button id="reloadBtn">再読込</button>
+          <button id="reloadBtn">最新を表示</button>
         </div>
       </header>
+
+      <section class="controls">
+        <div class="field">
+          <label for="fromSelect">開始日</label>
+          <select id="fromSelect"></select>
+        </div>
+        <div class="field">
+          <label for="toSelect">終了日</label>
+          <select id="toSelect"></select>
+        </div>
+        <button class="primary" id="rangeBtn">期間で表示</button>
+        <div class="hint">連休などは開始日〜終了日を選んで「期間で表示」できます。</div>
+      </section>
+
+      <div class="error" id="errorBox"></div>
+
       <section class="card">
         <pre id="report">読み込み中…</pre>
       </section>
     </main>
     <div class="toast" id="toast"></div>
     <script>
+      var GAS_EXEC =
+        'https://script.google.com/macros/s/AKfycbyeXfuRm18PLqiIT2pJF4aU_fII-rwiCYTVUwk9wbyclm7F8kiJZ_PW0up6d4noli02qQ/exec';
+      var dateOptions = [];
+
       function showToast(message) {
         var el = document.getElementById('toast');
         el.textContent = message;
@@ -118,19 +181,98 @@
         setTimeout(function () { el.classList.remove('show'); }, 1600);
       }
 
+      function fillSelect(selectEl, options, selectedKey) {
+        selectEl.innerHTML = '';
+        if (!options.length) {
+          var empty = document.createElement('option');
+          empty.value = '';
+          empty.textContent = '日付なし';
+          selectEl.appendChild(empty);
+          return;
+        }
+        for (var i = 0; i < options.length; i++) {
+          var opt = document.createElement('option');
+          opt.value = options[i].key;
+          opt.textContent = options[i].label;
+          if (options[i].key === selectedKey) opt.selected = true;
+          selectEl.appendChild(opt);
+        }
+        if (!selectedKey) selectEl.selectedIndex = options.length - 1;
+      }
+
       function applyReport(data) {
         document.getElementById('report').textContent = data.text || '日報がまだありません。';
         document.getElementById('updatedAt').textContent = data.updatedAt || '-';
         document.getElementById('targetLabel').textContent = data.targetLabel || '-';
+        if (data.dateOptions && data.dateOptions.length) {
+          dateOptions = data.dateOptions;
+          fillSelect(document.getElementById('fromSelect'), dateOptions, data.fromKey);
+          fillSelect(document.getElementById('toSelect'), dateOptions, data.toKey);
+        }
+        var errorBox = document.getElementById('errorBox');
+        if (data.error) {
+          errorBox.style.display = 'block';
+          errorBox.textContent = data.error;
+        } else {
+          errorBox.style.display = 'none';
+          errorBox.textContent = '';
+        }
       }
 
-      function loadReport() {
+      function loadPublished() {
         fetch('./report.json?ts=' + Date.now(), { cache: 'no-store' })
           .then(function (res) { return res.json(); })
           .then(applyReport)
           .catch(function () {
-            document.getElementById('report').textContent = '日報の読み込みに失敗しました。しばらくして再読込してください。';
+            document.getElementById('report').textContent =
+              '日報の読み込みに失敗しました。しばらくして再読込してください。';
           });
+      }
+
+      function loadLiveRange(from, to, busyBtn, doneLabel) {
+        busyBtn.disabled = true;
+        var prev = busyBtn.textContent;
+        busyBtn.textContent = '読込中…';
+        var cbName = 'uriageCb_' + Date.now();
+        var timeout = setTimeout(function () {
+          cleanup();
+          busyBtn.disabled = false;
+          busyBtn.textContent = doneLabel || prev;
+          showToast('読み込みに失敗しました');
+        }, 25000);
+
+        function cleanup() {
+          clearTimeout(timeout);
+          try { delete window[cbName]; } catch (e) { window[cbName] = undefined; }
+          if (script && script.parentNode) script.parentNode.removeChild(script);
+        }
+
+        window[cbName] = function (data) {
+          cleanup();
+          applyReport(data || {});
+          busyBtn.disabled = false;
+          busyBtn.textContent = doneLabel || prev;
+          showToast('表示を更新しました');
+        };
+
+        var script = document.createElement('script');
+        script.src =
+          GAS_EXEC +
+          '?format=jsonp&callback=' +
+          cbName +
+          '&from=' +
+          encodeURIComponent(from || '') +
+          '&to=' +
+          encodeURIComponent(to || '') +
+          '&ts=' +
+          Date.now();
+        script.onerror = function () {
+          cleanup();
+          busyBtn.disabled = false;
+          busyBtn.textContent = doneLabel || prev;
+          showToast('読み込みに失敗しました');
+        };
+        document.body.appendChild(script);
       }
 
       document.getElementById('copyBtn').addEventListener('click', function () {
@@ -157,11 +299,21 @@
       }
 
       document.getElementById('reloadBtn').addEventListener('click', function () {
-        loadReport();
-        showToast('再読込しました');
+        loadPublished();
+        showToast('最新を表示しました');
       });
 
-      loadReport();
+      document.getElementById('rangeBtn').addEventListener('click', function () {
+        var from = document.getElementById('fromSelect').value;
+        var to = document.getElementById('toSelect').value;
+        if (!from || !to) {
+          showToast('開始日と終了日を選んでください');
+          return;
+        }
+        loadLiveRange(from, to, document.getElementById('rangeBtn'), '期間で表示');
+      });
+
+      loadPublished();
     </script>
   </body>
 </html>
