@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>売上日報</title>
+    <style>
+      :root {
+        --bg: #eef3f0;
+        --card: #ffffff;
+        --ink: #1c2b24;
+        --muted: #5f7268;
+        --line: #d5e0da;
+        --accent: #1f6f54;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        font-family: "Hiragino Sans", "Hiragino Kaku Gothic ProN", "Noto Sans JP", Meiryo, sans-serif;
+        background:
+          radial-gradient(circle at top left, #d9ebe2 0, transparent 42%),
+          linear-gradient(180deg, #f7faf8 0%, var(--bg) 100%);
+        color: var(--ink);
+        min-height: 100vh;
+      }
+      main {
+        max-width: 720px;
+        margin: 0 auto;
+        padding: 24px 16px 48px;
+      }
+      header {
+        display: flex;
+        justify-content: space-between;
+        gap: 12px;
+        align-items: flex-end;
+        margin-bottom: 16px;
+        flex-wrap: wrap;
+      }
+      h1 {
+        margin: 0 0 4px;
+        font-size: 1.35rem;
+        letter-spacing: 0.04em;
+      }
+      .meta { color: var(--muted); font-size: 0.85rem; line-height: 1.5; }
+      .actions { display: flex; gap: 8px; flex-wrap: wrap; }
+      button {
+        border: 1px solid var(--line);
+        background: var(--card);
+        color: var(--ink);
+        border-radius: 10px;
+        padding: 10px 14px;
+        font: inherit;
+        cursor: pointer;
+        min-height: 44px;
+      }
+      button.primary {
+        background: var(--accent);
+        border-color: var(--accent);
+        color: #fff;
+      }
+      .card {
+        background: var(--card);
+        border: 1px solid var(--line);
+        border-radius: 18px;
+        padding: 20px;
+        box-shadow: 0 10px 30px rgba(28, 43, 36, 0.06);
+      }
+      pre {
+        margin: 0;
+        white-space: pre-wrap;
+        word-break: break-word;
+        font-family: inherit;
+        font-size: 1rem;
+        line-height: 1.7;
+      }
+      .toast {
+        position: fixed;
+        left: 50%;
+        bottom: 24px;
+        transform: translateX(-50%);
+        background: #17352b;
+        color: #fff;
+        padding: 10px 16px;
+        border-radius: 999px;
+        font-size: 0.9rem;
+        opacity: 0;
+        pointer-events: none;
+        transition: opacity 0.2s ease;
+      }
+      .toast.show { opacity: 1; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <header>
+        <div>
+          <h1>売上日報</h1>
+          <div class="meta">
+            対象: <span id="targetLabel">読込中…</span><br />
+            更新: <span id="updatedAt">-</span>
+          </div>
+        </div>
+        <div class="actions">
+          <button class="primary" id="copyBtn">文章をコピー</button>
+          <button id="reloadBtn">再読込</button>
+        </div>
+      </header>
+      <section class="card">
+        <pre id="report">読み込み中…</pre>
+      </section>
+    </main>
+    <div class="toast" id="toast"></div>
+    <script>
+      function showToast(message) {
+        var el = document.getElementById('toast');
+        el.textContent = message;
+        el.classList.add('show');
+        setTimeout(function () { el.classList.remove('show'); }, 1600);
+      }
+
+      function applyReport(data) {
+        document.getElementById('report').textContent = data.text || '日報がまだありません。';
+        document.getElementById('updatedAt').textContent = data.updatedAt || '-';
+        document.getElementById('targetLabel').textContent = data.targetLabel || '-';
+      }
+
+      function loadReport() {
+        fetch('./report.json?ts=' + Date.now(), { cache: 'no-store' })
+          .then(function (res) { return res.json(); })
+          .then(applyReport)
+          .catch(function () {
+            document.getElementById('report').textContent = '日報の読み込みに失敗しました。しばらくして再読込してください。';
+          });
+      }
+
+      document.getElementById('copyBtn').addEventListener('click', function () {
+        var text = document.getElementById('report').textContent;
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(text).then(function () {
+            showToast('コピーしました');
+          }).catch(function () {
+            fallbackCopy(text);
+          });
+        } else {
+          fallbackCopy(text);
+        }
+      });
+
+      function fallbackCopy(text) {
+        var ta = document.createElement('textarea');
+        ta.value = text;
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand('copy');
+        document.body.removeChild(ta);
+        showToast('コピーしました');
+      }
+
+      document.getElementById('reloadBtn').addEventListener('click', function () {
+        loadReport();
+        showToast('再読込しました');
+      });
+
+      loadReport();
+    </script>
+  </body>
+</html>
