@@ -94,6 +94,7 @@
         border-color: var(--accent);
         color: #fff;
       }
+      button:disabled { opacity: 0.6; cursor: wait; }
       .card {
         background: var(--card);
         border: 1px solid var(--line);
@@ -158,7 +159,7 @@
           <select id="toSelect"></select>
         </div>
         <button class="primary" id="rangeBtn">期間で表示</button>
-        <div class="hint">連休などは開始日〜終了日を選んで「期間で表示」を押してください。</div>
+        <div class="hint">シート更新後は「再読込」かページ更新で最新になります。期間中データがない店舗は、累計のみ最新時点を表示します。</div>
       </section>
 
       <div class="error" id="errorBox"></div>
@@ -169,6 +170,33 @@
     </main>
     <div class="toast" id="toast"></div>
     <script>
+      var CLINIC_DEFS = [
+        {
+          id: '1zZjh3Xy9iCfI3GfzCoO0lhTm15yHOdy4',
+          name: '湖北台診療所',
+          type: 'standard',
+          cols: { patients: 4, sales: 5, unit: 6 }
+        },
+        {
+          id: '1fKNfI_tyNTiesgSt_D5JKrqBcu0u8Lg-',
+          name: 'のがたクリニック',
+          type: 'standard',
+          cols: { patients: 4, sales: 5, unit: 6 }
+        },
+        {
+          id: '1J70_zP_oEkeHciqfOlpoWuv55oQDPMBJ',
+          name: 'みんなの血管外科池袋',
+          type: 'surgery',
+          cols: { patients: 4, sales: 5, surgeryCount: 6, surgerySales: 7 }
+        },
+        {
+          id: '1zWrAQNGZGNx57mwsn2DaZstd6yyUN3Uu',
+          name: '湯沢クリニック',
+          type: 'standard',
+          cols: { patients: 3, sales: 4, unit: 5 }
+        }
+      ];
+
       var dataStore = null;
 
       function showToast(message) {
@@ -184,7 +212,16 @@
       }
 
       function formatNumber(n) {
-        return Math.round(n).toLocaleString('ja-JP');
+        return Math.round(n || 0).toLocaleString('ja-JP');
+      }
+
+      function toNumber(v) {
+        if (v == null) return 0;
+        if (typeof v === 'number') return isFinite(v) ? v : 0;
+        var s = String(v).trim().replace(/,/g, '').replace(/ /g, '');
+        if (!s || /^#(DIV\/0!|VALUE!|REF!|N\/A)$/i.test(s)) return 0;
+        var n = Number(s);
+        return isFinite(n) ? n : 0;
       }
 
       function fillSelect(selectEl, options, selectedKey) {
@@ -211,6 +248,112 @@
         return hit ? hit.label : key;
       }
 
+      function cellValue(row, index) {
+        if (!row || !row.c || !row.c[index]) return '';
+        var cell = row.c[index];
+        if (cell.f != null && cell.f !== '') return cell.f;
+        return cell.v == null ? '' : cell.v;
+      }
+
+      function parseDayFromCell(raw) {
+        var s = String(raw || '').trim();
+        var m = s.match(/^(\d+)月(\d+)日$/);
+        if (m) return { month: Number(m[1]), day: Number(m[2]), key: Number(m[1]) + '/' + Number(m[2]) };
+        m = s.match(/^Date\((\d+),(\d+),(\d+)/);
+        if (m) {
+          var month = Number(m[2]) + 1;
+          var day = Number(m[3]);
+          return { month: month, day: day, key: month + '/' + day };
+        }
+        m = s.match(/^(\d{1,2})\/(\d{1,2})/);
+        if (m) return { month: Number(m[1]), day: Number(m[2]), key: Number(m[1]) + '/' + Number(m[2]) };
+        return null;
+      }
+
+      function parseGviz(resp, clinic) {
+        var days = [];
+        var rows = (resp && resp.table && resp.table.rows) || [];
+        for (var i = 0; i < rows.length; i++) {
+          var parsed = parseDayFromCell(cellValue(rows[i], 0));
+          if (!parsed) continue;
+          var patients = toNumber(cellValue(rows[i], clinic.cols.patients));
+          var sales = toNumber(cellValue(rows[i], clinic.cols.sales));
+          var item = {
+            month: parsed.month,
+            day: parsed.day,
+            key: parsed.key,
+            weekday: String(cellValue(rows[i], 1) || '').trim(),
+            patients: patients,
+            sales: sales,
+            unit: 0
+          };
+          if (clinic.type === 'standard') {
+            var unit = toNumber(cellValue(rows[i], clinic.cols.unit));
+            item.unit = unit || (patients ? sales / patients : 0);
+          } else {
+            item.surgeryCount = toNumber(cellValue(rows[i], clinic.cols.surgeryCount));
+            item.surgerySales = toNumber(cellValue(rows[i], clinic.cols.surgerySales));
+          }
+          days.push(item);
+        }
+        return { name: clinic.name, type: clinic.type, days: days };
+      }
+
+      function fetchClinicLive(clinic) {
+        return new Promise(function (resolve, reject) {
+          var cb = 'gviz_' + Math.random().toString(36).slice(2);
+          var script = document.createElement('script');
+          var timer = setTimeout(function () {
+            cleanup();
+            reject(new Error('timeout'));
+          }, 20000);
+
+          function cleanup() {
+            clearTimeout(timer);
+            try { delete window[cb]; } catch (e) { window[cb] = undefined; }
+            if (script.parentNode) script.parentNode.removeChild(script);
+          }
+
+          window[cb] = function (resp) {
+            cleanup();
+            try {
+              resolve(parseGviz(resp, clinic));
+            } catch (err) {
+              reject(err);
+            }
+          };
+
+          script.onerror = function () {
+            cleanup();
+            reject(new Error('script error'));
+          };
+          script.src =
+            'https://docs.google.com/spreadsheets/d/' +
+            clinic.id +
+            '/gviz/tq?tqx=out:json;responseHandler:' +
+            cb +
+            '&t=' +
+            Date.now();
+          document.body.appendChild(script);
+        });
+      }
+
+      function buildDateOptions(clinics) {
+        var map = {};
+        clinics.forEach(function (clinic) {
+          (clinic.days || []).forEach(function (d) {
+            if (d.patients <= 0 && d.sales <= 0) return;
+            map[d.key] = {
+              key: d.key,
+              label: d.month + '/' + d.day + '(' + d.weekday + ')'
+            };
+          });
+        });
+        return Object.keys(map)
+          .map(function (k) { return map[k]; })
+          .sort(function (a, b) { return sortValue(a.key) - sortValue(b.key); });
+      }
+
       function buildClinicRange(clinic, fromKey, toKey) {
         var fromVal = sortValue(fromKey);
         var toVal = sortValue(toKey);
@@ -218,10 +361,27 @@
           var v = sortValue(d.key);
           return v >= fromVal && v <= toVal && (d.patients > 0 || d.sales > 0);
         });
-        if (!selected.length) {
-          return { name: clinic.name, type: clinic.type, missing: true, days: [] };
+
+        var asOf = null;
+        if (selected.length) {
+          asOf = selected[selected.length - 1];
+        } else {
+          var before = (clinic.days || []).filter(function (d) {
+            return sortValue(d.key) <= toVal && (d.patients > 0 || d.sales > 0);
+          });
+          if (before.length) asOf = before[before.length - 1];
         }
-        var asOf = selected[selected.length - 1];
+
+        if (!asOf) {
+          return {
+            name: clinic.name,
+            type: clinic.type,
+            missing: true,
+            closedInRange: true,
+            days: []
+          };
+        }
+
         var cumPatients = 0;
         var cumSales = 0;
         var cumSurgeryCount = 0;
@@ -235,10 +395,12 @@
             cumSurgerySales += day.surgerySales || 0;
           }
         });
+
         return {
           name: clinic.name,
           type: clinic.type,
           missing: false,
+          closedInRange: selected.length === 0,
           days: selected,
           asOfMonth: asOf.month,
           asOfDay: asOf.day,
@@ -250,6 +412,20 @@
         };
       }
 
+      function appendCumulative(lines, r) {
+        lines.push('【' + r.asOfMonth + '/' + r.asOfDay + '時点】');
+        if (r.type === 'surgery') {
+          lines.push(r.asOfMonth + '月累計患者件数：' + formatNumber(r.cumPatients) + '件');
+          lines.push('(内オぺ：' + formatNumber(r.cumSurgeryCount) + '件)');
+          lines.push(r.asOfMonth + '月累計売上金額：' + formatNumber(r.cumSales) + '円');
+          lines.push('(内オぺ：' + formatNumber(r.cumSurgerySales) + '円)');
+        } else {
+          lines.push(r.asOfMonth + '月累計患者件数：' + formatNumber(r.cumPatients) + '件');
+          lines.push(r.asOfMonth + '月累計売上金額：' + formatNumber(r.cumSales) + '円');
+          lines.push(r.asOfMonth + '月平均売上単価：' + formatNumber(r.cumUnit) + '円');
+        }
+      }
+
       function buildText(reports, fromKey, toKey) {
         var lines = [];
         var startLabel = findLabel(fromKey);
@@ -258,15 +434,28 @@
         lines.push('');
         if (fromKey === toKey) {
           lines.push(startLabel + '各店舗の売上です。');
+        } else {
+          lines.push(startLabel + '〜' + endLabel + '各店舗の売上です。');
+        }
+        lines.push('');
+
+        reports.forEach(function (r) {
+          lines.push('●' + r.name);
           lines.push('');
-          reports.forEach(function (r) {
-            lines.push('●' + r.name);
+          if (r.missing) {
+            lines.push('（データなし）');
             lines.push('');
-            if (r.missing) {
-              lines.push('（データなし）');
-              lines.push('');
-              return;
-            }
+            return;
+          }
+          if (r.closedInRange) {
+            lines.push('（休診またはデータなし）');
+            lines.push('');
+            appendCumulative(lines, r);
+            lines.push('');
+            return;
+          }
+
+          if (fromKey === toKey) {
             var day = r.days[0];
             if (r.type === 'surgery') {
               lines.push('患者件数：' + formatNumber(day.patients) + '件');
@@ -279,30 +468,9 @@
               lines.push('売上単価：' + formatNumber(day.unit) + '円');
             }
             lines.push('');
-            lines.push('【' + r.asOfMonth + '/' + r.asOfDay + '時点】');
-            if (r.type === 'surgery') {
-              lines.push(r.asOfMonth + '月累計患者件数：' + formatNumber(r.cumPatients) + '件');
-              lines.push('(内オぺ：' + formatNumber(r.cumSurgeryCount) + '件)');
-              lines.push(r.asOfMonth + '月累計売上金額：' + formatNumber(r.cumSales) + '円');
-              lines.push('(内オぺ：' + formatNumber(r.cumSurgerySales) + '円)');
-            } else {
-              lines.push(r.asOfMonth + '月累計患者件数：' + formatNumber(r.cumPatients) + '件');
-              lines.push(r.asOfMonth + '月累計売上金額：' + formatNumber(r.cumSales) + '円');
-              lines.push(r.asOfMonth + '月平均売上単価：' + formatNumber(r.cumUnit) + '円');
-            }
+            appendCumulative(lines, r);
             lines.push('');
-          });
-        } else {
-          lines.push(startLabel + '〜' + endLabel + '各店舗の売上です。');
-          lines.push('');
-          reports.forEach(function (r) {
-            lines.push('●' + r.name);
-            lines.push('');
-            if (r.missing) {
-              lines.push('（データなし）');
-              lines.push('');
-              return;
-            }
+          } else {
             r.days.forEach(function (day, idx) {
               if (idx > 0) lines.push('');
               lines.push(day.month + '/' + day.day + '(' + day.weekday + ')');
@@ -318,20 +486,11 @@
               }
             });
             lines.push('');
-            lines.push('【' + r.asOfMonth + '/' + r.asOfDay + '時点】');
-            if (r.type === 'surgery') {
-              lines.push(r.asOfMonth + '月累計患者件数：' + formatNumber(r.cumPatients) + '件');
-              lines.push('(内オぺ：' + formatNumber(r.cumSurgeryCount) + '件)');
-              lines.push(r.asOfMonth + '月累計売上金額：' + formatNumber(r.cumSales) + '円');
-              lines.push('(内オぺ：' + formatNumber(r.cumSurgerySales) + '円)');
-            } else {
-              lines.push(r.asOfMonth + '月累計患者件数：' + formatNumber(r.cumPatients) + '件');
-              lines.push(r.asOfMonth + '月累計売上金額：' + formatNumber(r.cumSales) + '円');
-              lines.push(r.asOfMonth + '月平均売上単価：' + formatNumber(r.cumUnit) + '円');
-            }
+            appendCumulative(lines, r);
             lines.push('');
-          });
-        }
+          }
+        });
+
         lines.push('よろしくお願いいたします。');
         return lines.join('\n');
       }
@@ -364,23 +523,63 @@
         fillSelect(document.getElementById('toSelect'), dataStore.dateOptions || [], toKey);
       }
 
-      function loadData() {
-        fetch('./data.json?ts=' + Date.now(), { cache: 'no-store' })
-          .then(function (res) { return res.json(); })
-          .then(function (data) {
-            dataStore = data;
-            var options = data.dateOptions || [];
-            var latest = options.length ? options[options.length - 1].key : '';
-            fillSelect(document.getElementById('fromSelect'), options, latest);
-            fillSelect(document.getElementById('toSelect'), options, latest);
-            if (latest) showRange(latest, latest);
-            else {
-              document.getElementById('report').textContent = '表示できる日付がありません。';
-            }
+      function applyDataStore(store, keepRange) {
+        dataStore = store;
+        var options = store.dateOptions || [];
+        var latest = options.length ? options[options.length - 1].key : '';
+        var fromKey = latest;
+        var toKey = latest;
+        if (keepRange) {
+          fromKey = document.getElementById('fromSelect').value || latest;
+          toKey = document.getElementById('toSelect').value || latest;
+        }
+        fillSelect(document.getElementById('fromSelect'), options, fromKey);
+        fillSelect(document.getElementById('toSelect'), options, toKey);
+        if (latest) showRange(fromKey || latest, toKey || latest);
+        else document.getElementById('report').textContent = '表示できる日付がありません。';
+      }
+
+      function loadFromCache() {
+        return fetch('./data.json?ts=' + Date.now(), { cache: 'no-store' }).then(function (res) {
+          return res.json();
+        });
+      }
+
+      function loadLive() {
+        return Promise.all(CLINIC_DEFS.map(fetchClinicLive)).then(function (clinics) {
+          return {
+            updatedAt: new Date().toLocaleString('ja-JP', { timeZone: 'Asia/Tokyo' }) + '（シート最新）',
+            dateOptions: buildDateOptions(clinics),
+            clinics: clinics,
+            live: true
+          };
+        });
+      }
+
+      function loadData(keepRange) {
+        var reloadBtn = document.getElementById('reloadBtn');
+        reloadBtn.disabled = true;
+        reloadBtn.textContent = '読込中…';
+        document.getElementById('report').textContent = '最新データを読み込み中…';
+
+        loadLive()
+          .then(function (store) {
+            applyDataStore(store, keepRange);
+            showToast('シート最新を反映しました');
+          })
+          .catch(function () {
+            return loadFromCache().then(function (store) {
+              applyDataStore(store, keepRange);
+              showToast('キャッシュデータを表示しています');
+            });
           })
           .catch(function () {
             document.getElementById('report').textContent =
               'データの読み込みに失敗しました。ページを再読み込みしてください。';
+          })
+          .finally(function () {
+            reloadBtn.disabled = false;
+            reloadBtn.textContent = '再読込';
           });
       }
 
@@ -408,8 +607,7 @@
       }
 
       document.getElementById('reloadBtn').addEventListener('click', function () {
-        loadData();
-        showToast('再読込しました');
+        loadData(true);
       });
 
       document.getElementById('rangeBtn').addEventListener('click', function () {
@@ -423,7 +621,7 @@
         showToast('表示を更新しました');
       });
 
-      loadData();
+      loadData(false);
     </script>
   </body>
 </html>
