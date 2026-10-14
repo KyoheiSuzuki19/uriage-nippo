@@ -94,7 +94,6 @@
         border-color: var(--accent);
         color: #fff;
       }
-      button:disabled { opacity: 0.6; cursor: wait; }
       .card {
         background: var(--card);
         border: 1px solid var(--line);
@@ -145,7 +144,7 @@
         </div>
         <div class="actions">
           <button class="primary" id="copyBtn">文章をコピー</button>
-          <button id="reloadBtn">最新を表示</button>
+          <button id="reloadBtn">再読込</button>
         </div>
       </header>
 
@@ -159,7 +158,7 @@
           <select id="toSelect"></select>
         </div>
         <button class="primary" id="rangeBtn">期間で表示</button>
-        <div class="hint">連休などは開始日〜終了日を選んで「期間で表示」できます。</div>
+        <div class="hint">連休などは開始日〜終了日を選んで「期間で表示」を押してください。</div>
       </section>
 
       <div class="error" id="errorBox"></div>
@@ -170,15 +169,22 @@
     </main>
     <div class="toast" id="toast"></div>
     <script>
-      var GAS_EXEC =
-        'https://script.google.com/macros/s/AKfycbyeXfuRm18PLqiIT2pJF4aU_fII-rwiCYTVUwk9wbyclm7F8kiJZ_PW0up6d4noli02qQ/exec';
-      var dateOptions = [];
+      var dataStore = null;
 
       function showToast(message) {
         var el = document.getElementById('toast');
         el.textContent = message;
         el.classList.add('show');
         setTimeout(function () { el.classList.remove('show'); }, 1600);
+      }
+
+      function sortValue(key) {
+        var parts = String(key).split('/');
+        return Number(parts[0]) * 100 + Number(parts[1]);
+      }
+
+      function formatNumber(n) {
+        return Math.round(n).toLocaleString('ja-JP');
       }
 
       function fillSelect(selectEl, options, selectedKey) {
@@ -200,86 +206,182 @@
         if (!selectedKey) selectEl.selectedIndex = options.length - 1;
       }
 
-      function applyReport(data) {
-        document.getElementById('report').textContent = data.text || '日報がまだありません。';
-        document.getElementById('updatedAt').textContent = data.updatedAt || '-';
-        document.getElementById('targetLabel').textContent = data.targetLabel || '-';
-        if (data.dateOptions && data.dateOptions.length) {
-          dateOptions = data.dateOptions;
-          fillSelect(document.getElementById('fromSelect'), dateOptions, data.fromKey);
-          fillSelect(document.getElementById('toSelect'), dateOptions, data.toKey);
-        }
-        var errorBox = document.getElementById('errorBox');
-        if (data.error) {
-          errorBox.style.display = 'block';
-          errorBox.textContent = data.error;
-        } else {
-          errorBox.style.display = 'none';
-          errorBox.textContent = '';
-        }
+      function findLabel(key) {
+        var hit = (dataStore.dateOptions || []).find(function (d) { return d.key === key; });
+        return hit ? hit.label : key;
       }
 
-      function loadPublished() {
-        fetch('./report.json?ts=' + Date.now(), { cache: 'no-store' })
+      function buildClinicRange(clinic, fromKey, toKey) {
+        var fromVal = sortValue(fromKey);
+        var toVal = sortValue(toKey);
+        var selected = (clinic.days || []).filter(function (d) {
+          var v = sortValue(d.key);
+          return v >= fromVal && v <= toVal && (d.patients > 0 || d.sales > 0);
+        });
+        if (!selected.length) {
+          return { name: clinic.name, type: clinic.type, missing: true, days: [] };
+        }
+        var asOf = selected[selected.length - 1];
+        var cumPatients = 0;
+        var cumSales = 0;
+        var cumSurgeryCount = 0;
+        var cumSurgerySales = 0;
+        (clinic.days || []).forEach(function (day) {
+          if (day.month !== asOf.month || day.day > asOf.day) return;
+          cumPatients += day.patients;
+          cumSales += day.sales;
+          if (clinic.type === 'surgery') {
+            cumSurgeryCount += day.surgeryCount || 0;
+            cumSurgerySales += day.surgerySales || 0;
+          }
+        });
+        return {
+          name: clinic.name,
+          type: clinic.type,
+          missing: false,
+          days: selected,
+          asOfMonth: asOf.month,
+          asOfDay: asOf.day,
+          cumPatients: cumPatients,
+          cumSales: cumSales,
+          cumUnit: cumPatients ? cumSales / cumPatients : 0,
+          cumSurgeryCount: cumSurgeryCount,
+          cumSurgerySales: cumSurgerySales
+        };
+      }
+
+      function buildText(reports, fromKey, toKey) {
+        var lines = [];
+        var startLabel = findLabel(fromKey);
+        var endLabel = findLabel(toKey);
+        lines.push('お疲れ様です。');
+        lines.push('');
+        if (fromKey === toKey) {
+          lines.push(startLabel + '各店舗の売上です。');
+          lines.push('');
+          reports.forEach(function (r) {
+            lines.push('●' + r.name);
+            lines.push('');
+            if (r.missing) {
+              lines.push('（データなし）');
+              lines.push('');
+              return;
+            }
+            var day = r.days[0];
+            if (r.type === 'surgery') {
+              lines.push('患者件数：' + formatNumber(day.patients) + '件');
+              lines.push('(内オぺ：' + formatNumber(day.surgeryCount) + '件)');
+              lines.push('売上金額：' + formatNumber(day.sales) + '円');
+              lines.push('(内オぺ：' + formatNumber(day.surgerySales) + '円)');
+            } else {
+              lines.push('患者件数：' + formatNumber(day.patients) + '件');
+              lines.push('売上金額：' + formatNumber(day.sales) + '円');
+              lines.push('売上単価：' + formatNumber(day.unit) + '円');
+            }
+            lines.push('');
+            lines.push('【' + r.asOfMonth + '/' + r.asOfDay + '時点】');
+            if (r.type === 'surgery') {
+              lines.push(r.asOfMonth + '月累計患者件数：' + formatNumber(r.cumPatients) + '件');
+              lines.push('(内オぺ：' + formatNumber(r.cumSurgeryCount) + '件)');
+              lines.push(r.asOfMonth + '月累計売上金額：' + formatNumber(r.cumSales) + '円');
+              lines.push('(内オぺ：' + formatNumber(r.cumSurgerySales) + '円)');
+            } else {
+              lines.push(r.asOfMonth + '月累計患者件数：' + formatNumber(r.cumPatients) + '件');
+              lines.push(r.asOfMonth + '月累計売上金額：' + formatNumber(r.cumSales) + '円');
+              lines.push(r.asOfMonth + '月平均売上単価：' + formatNumber(r.cumUnit) + '円');
+            }
+            lines.push('');
+          });
+        } else {
+          lines.push(startLabel + '〜' + endLabel + '各店舗の売上です。');
+          lines.push('');
+          reports.forEach(function (r) {
+            lines.push('●' + r.name);
+            lines.push('');
+            if (r.missing) {
+              lines.push('（データなし）');
+              lines.push('');
+              return;
+            }
+            r.days.forEach(function (day, idx) {
+              if (idx > 0) lines.push('');
+              lines.push(day.month + '/' + day.day + '(' + day.weekday + ')');
+              if (r.type === 'surgery') {
+                lines.push('患者件数：' + formatNumber(day.patients) + '件');
+                lines.push('(内オぺ：' + formatNumber(day.surgeryCount) + '件)');
+                lines.push('売上金額：' + formatNumber(day.sales) + '円');
+                lines.push('(内オぺ：' + formatNumber(day.surgerySales) + '円)');
+              } else {
+                lines.push('患者件数：' + formatNumber(day.patients) + '件');
+                lines.push('売上金額：' + formatNumber(day.sales) + '円');
+                lines.push('売上単価：' + formatNumber(day.unit) + '円');
+              }
+            });
+            lines.push('');
+            lines.push('【' + r.asOfMonth + '/' + r.asOfDay + '時点】');
+            if (r.type === 'surgery') {
+              lines.push(r.asOfMonth + '月累計患者件数：' + formatNumber(r.cumPatients) + '件');
+              lines.push('(内オぺ：' + formatNumber(r.cumSurgeryCount) + '件)');
+              lines.push(r.asOfMonth + '月累計売上金額：' + formatNumber(r.cumSales) + '円');
+              lines.push('(内オぺ：' + formatNumber(r.cumSurgerySales) + '円)');
+            } else {
+              lines.push(r.asOfMonth + '月累計患者件数：' + formatNumber(r.cumPatients) + '件');
+              lines.push(r.asOfMonth + '月累計売上金額：' + formatNumber(r.cumSales) + '円');
+              lines.push(r.asOfMonth + '月平均売上単価：' + formatNumber(r.cumUnit) + '円');
+            }
+            lines.push('');
+          });
+        }
+        lines.push('よろしくお願いいたします。');
+        return lines.join('\n');
+      }
+
+      function showRange(fromKey, toKey) {
+        if (!dataStore) return;
+        if (sortValue(fromKey) > sortValue(toKey)) {
+          var tmp = fromKey;
+          fromKey = toKey;
+          toKey = tmp;
+        }
+        var reports = (dataStore.clinics || []).map(function (clinic) {
+          return buildClinicRange(clinic, fromKey, toKey);
+        });
+        var hasAny = reports.some(function (r) { return !r.missing; });
+        var errorBox = document.getElementById('errorBox');
+        if (!hasAny) {
+          errorBox.style.display = 'block';
+          errorBox.textContent = '指定期間のデータがありません。';
+          document.getElementById('report').textContent = '指定期間のデータがありません。';
+          return;
+        }
+        errorBox.style.display = 'none';
+        var text = buildText(reports, fromKey, toKey);
+        var label = fromKey === toKey ? findLabel(fromKey) : findLabel(fromKey) + '〜' + findLabel(toKey);
+        document.getElementById('report').textContent = text;
+        document.getElementById('targetLabel').textContent = label;
+        document.getElementById('updatedAt').textContent = dataStore.updatedAt || '-';
+        fillSelect(document.getElementById('fromSelect'), dataStore.dateOptions || [], fromKey);
+        fillSelect(document.getElementById('toSelect'), dataStore.dateOptions || [], toKey);
+      }
+
+      function loadData() {
+        fetch('./data.json?ts=' + Date.now(), { cache: 'no-store' })
           .then(function (res) { return res.json(); })
           .then(function (data) {
-            applyReport(data);
-            // 日付一覧が空なら、Apps Script から取得を試す
-            if (!data.dateOptions || !data.dateOptions.length) {
-              loadLiveRange('', '', document.getElementById('rangeBtn'), '期間で表示');
+            dataStore = data;
+            var options = data.dateOptions || [];
+            var latest = options.length ? options[options.length - 1].key : '';
+            fillSelect(document.getElementById('fromSelect'), options, latest);
+            fillSelect(document.getElementById('toSelect'), options, latest);
+            if (latest) showRange(latest, latest);
+            else {
+              document.getElementById('report').textContent = '表示できる日付がありません。';
             }
           })
           .catch(function () {
             document.getElementById('report').textContent =
-              '日報の読み込みに失敗しました。しばらくして再読込してください。';
-            loadLiveRange('', '', document.getElementById('rangeBtn'), '期間で表示');
+              'データの読み込みに失敗しました。ページを再読み込みしてください。';
           });
-      }
-
-      function loadLiveRange(from, to, busyBtn, doneLabel) {
-        busyBtn.disabled = true;
-        var prev = busyBtn.textContent;
-        busyBtn.textContent = '読込中…';
-        var cbName = 'uriageCb_' + Date.now();
-        var timeout = setTimeout(function () {
-          cleanup();
-          busyBtn.disabled = false;
-          busyBtn.textContent = doneLabel || prev;
-          showToast('読み込みに失敗しました');
-        }, 25000);
-
-        function cleanup() {
-          clearTimeout(timeout);
-          try { delete window[cbName]; } catch (e) { window[cbName] = undefined; }
-          if (script && script.parentNode) script.parentNode.removeChild(script);
-        }
-
-        window[cbName] = function (data) {
-          cleanup();
-          applyReport(data || {});
-          busyBtn.disabled = false;
-          busyBtn.textContent = doneLabel || prev;
-          showToast('表示を更新しました');
-        };
-
-        var script = document.createElement('script');
-        script.src =
-          GAS_EXEC +
-          '?format=jsonp&callback=' +
-          cbName +
-          '&from=' +
-          encodeURIComponent(from || '') +
-          '&to=' +
-          encodeURIComponent(to || '') +
-          '&ts=' +
-          Date.now();
-        script.onerror = function () {
-          cleanup();
-          busyBtn.disabled = false;
-          busyBtn.textContent = doneLabel || prev;
-          showToast('読み込みに失敗しました');
-        };
-        document.body.appendChild(script);
       }
 
       document.getElementById('copyBtn').addEventListener('click', function () {
@@ -306,8 +408,8 @@
       }
 
       document.getElementById('reloadBtn').addEventListener('click', function () {
-        loadPublished();
-        showToast('最新を表示しました');
+        loadData();
+        showToast('再読込しました');
       });
 
       document.getElementById('rangeBtn').addEventListener('click', function () {
@@ -317,10 +419,11 @@
           showToast('開始日と終了日を選んでください');
           return;
         }
-        loadLiveRange(from, to, document.getElementById('rangeBtn'), '期間で表示');
+        showRange(from, to);
+        showToast('表示を更新しました');
       });
 
-      loadPublished();
+      loadData();
     </script>
   </body>
 </html>
